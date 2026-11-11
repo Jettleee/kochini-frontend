@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  KOCHINI design tokens.
+  The four "plate" colours come from competition bumper plates and always encode
+  the same thing: blue = actions/brand, red = protein, yellow = carbs, green = fat.
+*/
+:root {
+  --chalk: #eef0ec;        /* app background: cool chalk, not cream */
+  --surface: #ffffff;      /* panels */
+  --iron: #1c2127;         /* sidebar, primary text */
+  --iron-soft: #2a313a;
+  --ink: #1c2127;
+  --steel: #5f6872;        /* secondary text (4.9:1 on white) */
+  --line: #d6dad3;
+  --plate-blue: #1d4e9e;
+  --plate-blue-soft: #e3eaf6;
+  --plate-red: #c8323c;
+  --plate-yellow: #e2a20b;
+  --plate-green: #2f8559;
+  --danger: #a3202a;
+  --ok: #2f8559;
+  color-scheme: light;
+}
+
+@layer base {
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    @apply bg-chalk text-ink font-sans antialiased;
+    font-size: 15px;
+    line-height: 1.5;
+    font-feature-settings: "tnum" 1;
+  }
+  h1, h2, h3 { @apply font-display text-ink; letter-spacing: 0.005em; }
+  h1 { font-size: 2rem; line-height: 1.1; font-weight: 700; }
+  h2 { font-size: 1.375rem; line-height: 1.2; font-weight: 600; }
+  h3 { font-size: 1.125rem; line-height: 1.25; font-weight: 600; }
+  :focus-visible { outline: 2px solid var(--plate-blue); outline-offset: 2px; border-radius: 4px; }
+  ::selection { background: var(--plate-blue-soft); }
+}
+
+@layer components {
+  .panel { @apply bg-surface border border-line rounded-panel; }
+  .num { @apply font-display font-semibold tabular-nums; }
+  .input {
+    @apply w-full rounded-[4px] border border-line bg-surface px-3 py-2 text-[15px] text-ink placeholder:text-steel/70
+      focus:outline-none focus:border-brand focus:ring-2 focus:ring-brand/20;
+  }
+  .input[aria-invalid="true"] { @apply border-danger focus:ring-danger/20; }
+  .link { @apply text-brand font-medium underline-offset-2 hover:underline; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* The one orchestrated motion: plates sliding onto the bar on the dashboard */
+@keyframes load-plate {
+  from { transform: translateX(-24px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.plate-in { animation: load-plate 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }

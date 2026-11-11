@@ -1,0 +1,178 @@
+# KOCHINI frontend pipeline
+#   Pull requests: typecheck, build, dependency audit, Dockerfile lint, image build + CVE scan.
+#   main:          same, then push the image to Azure Container Registry.
+# Backlog: FIT-138 (CI frontend), FIT-140 (versioned images), FIT-141 (push to ACR),
+#          FIT-149 (SCA), FIT-150 (image scan), FIT-157 (SBOM).
+#
+# Repository settings needed before the push step works:
+#   Variables: ACR_NAME            (e.g. kochiniacr, without .azurecr.io)
+#   Secrets:   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+#              (app registration with a federated credential for this repo + AcrPush on the registry)
+
+name: frontend
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+concurrency:
+  group: frontend-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: kochini-frontend
+  NODE_VERSION: "22"
+
+jobs:
+  ci:
+    name: Typecheck, build, audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test --if-present
+
+      - name: Build
+        run: npm run build
+
+      # Fails on high/critical vulnerabilities in packages that ship to the browser.
+      # Dev-only advisories are reported but don't block.
+      - name: Dependency audit (SCA)
+        run: |
+          npm audit --omit=dev --audit-level=high
+          npm audit || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          retention-days: 7
+
+  image:
+    name: Docker image
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write          # OIDC login to Azure, no stored registry password
+      security-events: write   # upload Trivy results to the Security tab
+    env:
+      REGISTRY: ${{ vars.ACR_NAME && format('{0}.azurecr.io', vars.ACR_NAME) || 'local' }}
+      PUSH: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Tags: short commit SHA (always), branch name, and semver for v* tags.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test container
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
+          docker run -d --name fe --read-only --tmpfs /tmp --cap-drop ALL \
+            --security-opt no-new-privileges -e API_URL=https://api.example.test/api -p 8080:8080 "$IMAGE"
+          for i in $(seq 1 20); do curl -fsS http://localhost:8080/healthz && break; sleep 1; done
+          curl -fsS http://localhost:8080/app/workouts | grep -q '<div id="root">'
+          curl -fsS http://localhost:8080/env-config.js | grep -q 'api.example.test'
+          curl -fsSI http://localhost:8080/ | grep -qi 'content-security-policy'
+          test "$(docker exec fe id -u)" = "101"
+          docker logs fe
+          docker rm -f fe
+
+      - name: Scan image (Trivy, SARIF)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          format: sarif
+          output: trivy.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('trivy.sarif') != ''
+        continue-on-error: true   # fork PRs can't upload
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-frontend-image
+
+      # Blocking gate: fixable CRITICAL vulnerabilities stop the pipeline (FIT-150 policy).
+      - name: Fail on critical CVEs
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          format: spdx-json
+          artifact-name: sbom-frontend-${{ steps.meta.outputs.version }}.spdx.json
+
+      - name: Azure login (OIDC)
+        if: env.PUSH == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Push to ACR
+        if: env.PUSH == 'true'
+        run: |
+          az acr login --name "${{ vars.ACR_NAME }}"
+          docker push --all-tags "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          echo "### Pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo '${{ steps.meta.outputs.tags }}' | sed 's/^/- `/; s/$/`/' >> "$GITHUB_STEP_SUMMARY"

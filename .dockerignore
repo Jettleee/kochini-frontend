@@ -1,0 +1,13 @@
+node_modules
+dist
+dist-preview
+coverage
+.git
+.github
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+docker-compose*.yml
+*.tsbuildinfo
